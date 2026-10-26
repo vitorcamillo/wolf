@@ -210,6 +210,7 @@ void UnixSocketServer::endpoint_StreamSessions(const HTTPRequest &req, std::shar
 }
 
 void UnixSocketServer::endpoint_StreamSessionAdd(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
+  std::lock_guard<std::recursive_mutex> lifecycle_lock(*state_->app_state->session_lifecycle_mutex);
   auto session = rfl::json::read<rfl::Reflector<events::StreamSession>::ReflType>(req.body);
   if (session) {
     immer::box<events::App> choosen_app;
@@ -283,6 +284,12 @@ void UnixSocketServer::endpoint_StreamSessionAdd(const HTTPRequest &req, std::sh
     new_session->ip = ss.client_ip;
     new_session->rtsp_fake_ip = ss.rtsp_fake_ip;
 
+    // A second record for the same paired client would make a conditional stop ambiguous.
+    if (state::get_session_by_id(state_->app_state->running_sessions->load(), new_session->session_id)) {
+      send_http(socket, 409, rfl::json::write(GenericErrorResponse{.error = "Client already has a session"}));
+      return;
+    }
+
     state_->app_state->running_sessions->update(
         [new_session](const immer::vector<events::StreamSession> &ses_v) { return ses_v.push_back(*new_session); });
     state_->app_state->event_bus->fire_event(immer::box<events::StreamSession>(*new_session));
@@ -350,11 +357,17 @@ void UnixSocketServer::endpoint_StreamSessionPause(const HTTPRequest &req, std::
 }
 
 void UnixSocketServer::endpoint_StreamSessionStop(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
+  std::lock_guard<std::recursive_mutex> lifecycle_lock(*state_->app_state->session_lifecycle_mutex);
   auto session = rfl::json::read<StreamSessionStopRequest>(req.body);
   if (session) {
     auto sessions = state_->app_state->running_sessions->load();
     auto session_id = std::stoul(session.value().session_id);
-    if (state::get_session_by_id(sessions.get(), session_id)) {
+    if (auto current = state::get_session_by_id(sessions.get(), session_id)) {
+      if (session.value().expected_generation &&
+          (*session.value().expected_generation == 0 || *session.value().expected_generation != current->generation)) {
+        send_http(socket, 409, rfl::json::write(GenericErrorResponse{.error = "Session generation changed"}));
+        return;
+      }
       this->state_->app_state->event_bus->fire_event(
           immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = session_id}));
       auto res = GenericSuccessResponse{.success = true};

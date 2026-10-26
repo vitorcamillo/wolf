@@ -410,6 +410,7 @@ void launch(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
             const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::Request> &request,
             const state::PairedClient &current_client,
             const immer::box<state::AppState> &state) {
+  std::lock_guard<std::recursive_mutex> lifecycle_lock(*state->session_lifecycle_mutex);
   log_req<SimpleWeb::HTTPS>(request);
 
   SimpleWeb::CaseInsensitiveMultimap headers = request->parse_query_string();
@@ -443,6 +444,7 @@ void resume(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
             const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::Request> &request,
             const state::PairedClient &current_client,
             const immer::box<state::AppState> &state) {
+  std::lock_guard<std::recursive_mutex> lifecycle_lock(*state->session_lifecycle_mutex);
   log_req<SimpleWeb::HTTPS>(request);
 
   auto client_ip = get_client_ip<SimpleWeb::HTTPS>(request);
@@ -476,6 +478,7 @@ void cancel(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
             const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::Request> &request,
             const state::PairedClient &current_client,
             const immer::box<state::AppState> &state) {
+  std::lock_guard<std::recursive_mutex> lifecycle_lock(*state->session_lifecycle_mutex);
   log_req<SimpleWeb::HTTPS>(request);
 
   auto client_session = state::get_session_by_client(state->running_sessions->load(), current_client);

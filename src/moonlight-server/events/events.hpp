@@ -463,6 +463,9 @@ struct StreamSession {
 
   std::shared_ptr<std::optional<input::PenTablet>> pen_tablet =
       std::make_shared<std::optional<input::PenTablet>>(); /* Optional, will be set on first use */
+
+  // Server-assigned identity for one execution; session_id is reused by the paired client.
+  std::uint64_t generation = 0;
 };
 
 } // namespace wolf::core::events

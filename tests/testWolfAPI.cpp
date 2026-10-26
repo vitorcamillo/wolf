@@ -422,6 +422,25 @@ TEST_CASE("Sessions APIs", "[API]") {
   auto sessions2 = rfl::json::read<StreamSessionListResponse>(response->second).value();
   REQUIRE(sessions2.success);
   REQUIRE(sessions2.sessions.size() == 1);
+  REQUIRE(sessions2.sessions[0].generation.has_value());
+  const auto generation = *sessions2.sessions[0].generation;
+  REQUIRE(generation > 0);
+
+  response = req(curl.get(), HTTPMethod::POST, "http://localhost/api/v1/sessions/add", rfl::json::write(session));
+  REQUIRE(response);
+  REQUIRE(response->first == 409);
+
+  // A confirmation for another execution of the same client must not stop this one.
+  auto stale_stop = StreamSessionStopRequest{.session_id = "10594003729173467913",
+                                             .expected_generation = generation + 1};
+  response = req(curl.get(), HTTPMethod::POST, "http://localhost/api/v1/sessions/stop", rfl::json::write(stale_stop));
+  REQUIRE(response);
+  REQUIRE(response->first == 409);
+  response = req(curl.get(), HTTPMethod::GET, "http://localhost/api/v1/sessions");
+  REQUIRE(response);
+  auto still_running = rfl::json::read<StreamSessionListResponse>(response->second).value();
+  REQUIRE(still_running.sessions.size() == 1);
+  REQUIRE(still_running.sessions[0].generation == generation);
 
   // TODO: breaks Github CI
   // // Test that we can send input to a session
@@ -442,7 +461,8 @@ TEST_CASE("Sessions APIs", "[API]") {
   REQUIRE_THAT(response->second, Equals("{\"success\":true}"));
 
   // Test that we can stop a session
-  auto stop_request = StreamSessionStopRequest{.session_id = "10594003729173467913"};
+  auto stop_request = StreamSessionStopRequest{.session_id = "10594003729173467913",
+                                               .expected_generation = generation};
   response = req(curl.get(), HTTPMethod::POST, "http://localhost/api/v1/sessions/stop", rfl::json::write(stop_request));
   REQUIRE(response);
   REQUIRE_THAT(response->second, Equals("{\"success\":true}"));

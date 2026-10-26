@@ -20,6 +20,7 @@
 #include <moonlight/data-structures.hpp>
 #include <openssl/x509.h>
 #include <optional>
+#include <mutex>
 #include <state/serialised_config.hpp>
 #include <utility>
 #include <vector>
@@ -195,6 +196,9 @@ struct AppState {
    * A list of all currently running (and paused) streaming sessions
    */
   SessionsAtoms running_sessions;
+
+  // Serializes client launch/resume/cancel with conditional API stop dispatch.
+  std::shared_ptr<std::recursive_mutex> session_lifecycle_mutex = std::make_shared<std::recursive_mutex>();
 };
 
 const static immer::array<audio::AudioMode> AUDIO_CONFIGURATIONS = {
