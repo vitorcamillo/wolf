@@ -427,6 +427,7 @@ TEST_CASE("Sessions APIs", "[API]") {
   REQUIRE(sessions2.sessions[0].generation.has_value());
   const auto generation = *sessions2.sessions[0].generation;
   REQUIRE(generation > 0);
+  REQUIRE(generation > 1'000'000'000'000'000ULL); // clock-seeded, not restarting at 1
 
   response = req(curl.get(), HTTPMethod::POST, "http://localhost/api/v1/sessions/add", rfl::json::write(session));
   REQUIRE(response);

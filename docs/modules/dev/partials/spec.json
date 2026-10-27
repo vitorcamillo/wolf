@@ -682,6 +682,16 @@
             },
             "description": ""
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/wolf__api__GenericErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
           "500": {
             "content": {
               "application/json": {
@@ -833,6 +843,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/wolf__api__GenericSuccessResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/wolf__api__GenericErrorResponse"
                 }
               }
             },
@@ -1622,6 +1642,9 @@
         "type": "object",
         "properties": {
           "session_id": {
+            "type": "string"
+          },
+          "expected_generation": {
             "type": "string"
           }
         },

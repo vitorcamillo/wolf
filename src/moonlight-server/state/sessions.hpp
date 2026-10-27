@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <events/events.hpp>
 #include <helpers/logger.hpp>
 #include <helpers/utils.hpp>
@@ -131,7 +132,11 @@ inline std::shared_ptr<events::StreamSession> create_stream_session(immer::box<s
       .audio_stream_port = static_cast<unsigned short>(get_port(AUDIO_PING_PORT)),
       .control_stream_port = static_cast<unsigned short>(get_port(CONTROL_PORT))};
 
-  static std::atomic<std::uint64_t> next_generation{1};
+  // Seeded from the clock so an execution identity is not reused after Wolf restarts.
+  static std::atomic<std::uint64_t> next_generation{
+      static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::system_clock::now().time_since_epoch())
+                                     .count())};
   session.generation = next_generation.fetch_add(1, std::memory_order_relaxed);
   return std::make_shared<events::StreamSession>(session);
 }
