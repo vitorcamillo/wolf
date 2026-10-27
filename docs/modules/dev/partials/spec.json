@@ -1082,6 +1082,10 @@
       "rfl__Reflector_wolf__core__events__StreamSession___ReflType": {
         "type": "object",
         "properties": {
+          "generation": {
+            "type": "string",
+            "description": "Opaque server-assigned execution id, decimal text."
+          },
           "client_ip": {
             "type": "string"
           },
@@ -1645,7 +1649,8 @@
             "type": "string"
           },
           "expected_generation": {
-            "type": "string"
+            "type": "string",
+            "description": "Opaque value of the session's generation, as returned by GET /api/v1/sessions."
           }
         },
         "required": [

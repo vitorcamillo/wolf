@@ -427,7 +427,7 @@ TEST_CASE("Sessions APIs", "[API]") {
   REQUIRE(sessions2.sessions[0].generation.has_value());
   const auto generation = *sessions2.sessions[0].generation;
   REQUIRE(generation > 0);
-  REQUIRE(generation > 1'000'000'000'000'000ULL); // clock-seeded, not restarting at 1
+  REQUIRE_THAT(response->second, ContainsSubstring("\"generation\":\"" + std::to_string(generation) + "\""));
 
   response = req(curl.get(), HTTPMethod::POST, "http://localhost/api/v1/sessions/add", rfl::json::write(session));
   REQUIRE(response);
@@ -540,6 +540,7 @@ TEST_CASE("Conditional stop races a session replacement", "[API]") {
 
   auto stale = StreamSessionStopRequest{.session_id = "10594003729173467913", .expected_generation = generation};
   const auto stale_body = rfl::json::write(stale);
+  REQUIRE_THAT(stale_body, ContainsSubstring("\"expected_generation\":\""));
   std::optional<std::pair<long, std::string>> stale_response;
   std::unique_lock<std::recursive_mutex> lock(*app_state->session_lifecycle_mutex);
   std::thread stop_thread([&]() {
