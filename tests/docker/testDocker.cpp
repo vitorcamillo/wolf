@@ -1,3 +1,11 @@
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <thread>
+#include <unistd.h>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_container_properties.hpp>
 #include <catch2/matchers/catch_matchers_contains.hpp>
@@ -12,6 +20,71 @@
 
 using Catch::Matchers::Contains;
 using Catch::Matchers::Equals;
+
+TEST_CASE("Docker stop has a bounded transport timeout", "[DOCKER-TIMEOUT]") {
+  docker::init();
+  const auto path = "/tmp/wolf-docker-hang-" + std::to_string(getpid()) + ".sock";
+  const int listener = socket(AF_UNIX, SOCK_STREAM, 0);
+  REQUIRE(listener >= 0);
+  sockaddr_un address{};
+  address.sun_family = AF_UNIX;
+  std::strncpy(address.sun_path, path.c_str(), sizeof(address.sun_path) - 1);
+  unlink(path.c_str());
+  if (bind(listener, reinterpret_cast<sockaddr *>(&address), sizeof(address)) != 0 || listen(listener, 4) != 0) {
+    close(listener);
+    unlink(path.c_str());
+    FAIL("Could not start the Unix socket server");
+  }
+
+  std::atomic<bool> done{false};
+  std::thread server([&]() {
+    while (!done.load()) {
+      pollfd ready{listener, POLLIN, 0};
+      if (poll(&ready, 1, 100) <= 0 || !(ready.revents & POLLIN)) {
+        continue;
+      }
+      const int client = accept(listener, nullptr, nullptr);
+      if (client < 0) {
+        continue;
+      }
+      std::string request;
+      while (!done.load() && request.find("\r\n\r\n") == std::string::npos) {
+        pollfd readable{client, POLLIN, 0};
+        if (poll(&readable, 1, 100) <= 0) {
+          continue;
+        }
+        char buffer[1024];
+        const auto count = recv(client, buffer, sizeof(buffer), 0);
+        if (count <= 0) {
+          break;
+        }
+        request.append(buffer, static_cast<std::size_t>(count));
+      }
+      if (request.find("/version") != std::string::npos) {
+        const std::string body = R"({"ApiVersion":"1.41"})";
+        const auto response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
+                              std::to_string(body.size()) + "\r\n\r\n" + body;
+        send(client, response.data(), response.size(), MSG_NOSIGNAL);
+      } else {
+        while (!done.load()) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+      }
+      close(client);
+    }
+  });
+
+  docker::DockerAPI api(path);
+  const auto start = std::chrono::steady_clock::now();
+  const bool stopped = api.stop_by_id("abc", 1);
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  done.store(true);
+  server.join();
+  close(listener);
+  unlink(path.c_str());
+  REQUIRE_FALSE(stopped);
+  REQUIRE(elapsed < std::chrono::seconds(10));
+}
 
 TEST_CASE("Docker API", "[DOCKER]") {
   docker::init();

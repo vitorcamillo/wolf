@@ -267,6 +267,8 @@ bool DockerAPI::start_by_id(std::string_view id) const {
 
 bool DockerAPI::stop_by_id(std::string_view id, int timeout_seconds) const {
   if (auto conn = docker_connect(socket_path)) {
+    // Docker waits t seconds before killing; transport is bounded to that plus 5 seconds.
+    curl_easy_setopt(conn.value().get(), CURLOPT_TIMEOUT, static_cast<long>(timeout_seconds + 5));
     auto raw_msg = req(
         conn.value().get(),
         POST,
