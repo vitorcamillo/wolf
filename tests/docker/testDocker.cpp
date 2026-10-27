@@ -101,7 +101,6 @@ TEST_CASE("Docker stop dispatch does not block the lifecycle mutex", "[DOCKER-TI
     std::atomic<bool> done{false};
     std::atomic<bool> exited{false};
     std::atomic<bool> stop_requested{false};
-    std::atomic<bool> stop_released{false};
     std::atomic<int> inspects{0};
   };
   auto daemon = std::make_shared<FakeDaemon>();
@@ -171,7 +170,7 @@ TEST_CASE("Docker stop dispatch does not block the lifecycle mutex", "[DOCKER-TI
       respond(client, 201, R"({"Id":"fake-container-id"})");
     } else if (request.find("/stop") != std::string::npos) {
       daemon->stop_requested.store(true);
-      while (!daemon->stop_released.load() && !daemon->done.load()) {
+      while (!daemon->done.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
       }
       respond(client, 204, "");
@@ -249,9 +248,8 @@ TEST_CASE("Docker stop dispatch does not block the lifecycle mutex", "[DOCKER-TI
   const bool stop_seen = wait_until([&daemon] { return daemon->stop_requested.load(); }, std::chrono::seconds(5));
 
   daemon->exited.store(true);
-  daemon->stop_released.store(true);
-  const bool runner_finished = wait_until([&runner_done] { return runner_done->load(); }, std::chrono::seconds(20));
   daemon->done.store(true);
+  const bool runner_finished = wait_until([&runner_done] { return runner_done->load(); }, std::chrono::seconds(20));
   server.join();
   close(listener);
   unlink(path.c_str());
