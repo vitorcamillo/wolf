@@ -45,16 +45,6 @@ immer::box<RTPPingType> wait_for_ping(std::shared_ptr<events::EventBusType> ev_b
   return ping_ev;
 }
 
-bool stop_stream_if_current(const immer::box<state::AppState> &app_state, const events::StreamSession &session) {
-  std::lock_guard<std::recursive_mutex> lifecycle_lock(*app_state->session_lifecycle_mutex);
-  if (!state::is_current_execution(app_state->running_sessions->load(), session.session_id, session.generation)) {
-    return false;
-  }
-  app_state->event_bus->fire_event(
-      immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = session.session_id}));
-  return true;
-}
-
 immer::vector<immer::box<events::EventBusHandlers>>
 setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
                          const std::string &runtime_dir,
@@ -241,7 +231,13 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
           // Runner process ended
           if (run_session->stop_stream_when_over) {
             run_session->stream_session->wayland_display->store(nullptr);
-            stop_stream_if_current(app_state, *run_session->stream_session);
+            std::lock_guard<std::recursive_mutex> lifecycle_lock(*app_state->session_lifecycle_mutex);
+            if (state::is_current_execution(app_state->running_sessions->load(),
+                                            run_session->stream_session->session_id,
+                                            run_session->stream_session->generation)) {
+              app_state->event_bus->fire_event(immer::box<events::StopStreamEvent>(
+                  events::StopStreamEvent{.session_id = run_session->stream_session->session_id}));
+            }
           }
         }).detach();
       }));

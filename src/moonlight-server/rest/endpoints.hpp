@@ -440,29 +440,6 @@ void launch(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
   send_xml<SimpleWeb::HTTPS>(response, SimpleWeb::StatusCode::success_ok, xml);
 }
 
-/**
- * Resume keeps the running execution: the replacement session inherits the old
- * generation (along with its display handle and devices) and takes its place
- * in the registry, so a runner that ends later still matches this execution.
- */
-void resume_session(const immer::box<state::AppState> &state,
-                    const events::StreamSession &old_session,
-                    const std::shared_ptr<events::StreamSession> &new_session) {
-  state::carry_execution(old_session, *new_session);
-  // Carry over the old session display handle
-  new_session->wayland_display = old_session.wayland_display;
-  // Carry over the old session devices, they'll be already plugged into the container
-  new_session->mouse = old_session.mouse;
-  new_session->keyboard = old_session.keyboard;
-  new_session->joypads = old_session.joypads;
-  new_session->pen_tablet = old_session.pen_tablet;
-  new_session->touch_screen = old_session.touch_screen;
-
-  state->running_sessions->update([&old_session, new_session](const immer::vector<events::StreamSession> ses_v) {
-    return state::remove_session(ses_v, old_session).push_back(*new_session);
-  });
-}
-
 void resume(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::Response> &response,
             const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::Request> &request,
             const state::PairedClient &current_client,
@@ -475,7 +452,19 @@ void resume(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
   if (old_session) {
     auto new_session =
         create_run_session(request->parse_query_string(), client_ip, current_client, state, *old_session->app);
-    resume_session(state, *old_session, new_session);
+    state::carry_execution(*old_session, *new_session);
+    // Carry over the old session display handle
+    new_session->wayland_display = std::move(old_session->wayland_display);
+    // Carry over the old session devices, they'll be already plugged into the container
+    new_session->mouse = std::move(old_session->mouse);
+    new_session->keyboard = std::move(old_session->keyboard);
+    new_session->joypads = std::move(old_session->joypads);
+    new_session->pen_tablet = std::move(old_session->pen_tablet);
+    new_session->touch_screen = std::move(old_session->touch_screen);
+
+    state->running_sessions->update([&old_session, new_session](const immer::vector<events::StreamSession> ses_v) {
+      return state::remove_session(ses_v, old_session.value()).push_back(*new_session);
+    });
 
     auto rtsp_ip = get_rtsp_ip_string(get_host_ip<SimpleWeb::HTTPS>(request, state), *new_session);
     auto xml = moonlight::launch_resume(rtsp_ip, std::to_string(get_port(state::RTSP_SETUP_PORT)));

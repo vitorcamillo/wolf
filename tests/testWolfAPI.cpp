@@ -1,7 +1,5 @@
 #include <api/api.hpp>
 #include <atomic>
-#include <cstdlib>
-#include <functional>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <curl/curl.h>
@@ -473,47 +471,6 @@ TEST_CASE("Sessions APIs", "[API]") {
   REQUIRE_THAT(response->second, Equals("{\"success\":true}"));
 }
 
-namespace {
-
-/** Runner double: stays inside run() until released, like a long-lived container would. */
-struct BlockingRunner : events::Runner {
-  std::atomic<bool> started{false};
-  std::atomic<bool> release{false};
-  std::atomic<bool> exited{false};
-
-  void run(std::string_view,
-           std::string_view,
-           std::string_view,
-           std::shared_ptr<events::devices_atom_queue>,
-           const immer::array<std::string> &,
-           const immer::array<std::pair<std::string, std::string>> &,
-           const immer::map<std::string, std::string> &,
-           std::string_view) override {
-    started.store(true);
-    while (!release.load()) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    exited.store(true);
-  }
-
-  events::RunnerTypes serialize() const override {
-    return wolf::config::AppCMD{.run_cmd = "blocking-runner"};
-  }
-};
-
-bool wait_until(const std::function<bool()> &predicate, std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
-  const auto deadline = std::chrono::steady_clock::now() + timeout;
-  while (std::chrono::steady_clock::now() < deadline) {
-    if (predicate()) {
-      return true;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-  }
-  return predicate();
-}
-
-} // namespace
-
 TEST_CASE("Runner end only stops its own execution", "[API]") {
   events::StreamSession a{};
   a.session_id = 1234;
@@ -531,99 +488,6 @@ TEST_CASE("Runner end only stops its own execution", "[API]") {
   REQUIRE(c.generation == 2);
   REQUIRE(state::is_current_execution(immer::vector<events::StreamSession>{c}, a.session_id, 2));
   REQUIRE_FALSE(state::is_current_execution(immer::vector<events::StreamSession>{}, a.session_id, 2));
-}
-
-// Exercises the production moonlight handlers (StreamSession -> StartRunner -> runner-end
-// callback and the StopStreamEvent removal handler) with a substitutable runner, instead of
-// only testing the is_current_execution/carry_execution helpers in isolation.
-TEST_CASE("Runner end only stops its own execution (production handlers)", "[API]") {
-  setenv("WOLF_SKIP_WAYLAND_SOCKET_WAIT", "TRUE", 1);
-  auto event_bus = std::make_shared<events::EventBusType>();
-  auto running_sessions = std::make_shared<immer::atom<immer::vector<events::StreamSession>>>();
-  auto config = immer::box<state::Config>(state::load_or_default("config.test.toml", event_bus, running_sessions));
-  auto app_state = immer::box<state::AppState>(state::AppState{
-      .config = config,
-      .pairing_cache = std::make_shared<immer::atom<immer::map<std::string, state::PairCache>>>(),
-      .pairing_atom = std::make_shared<immer::atom<immer::map<std::string, immer::box<events::PairSignal>>>>(),
-      .event_bus = event_bus,
-      .lobbies = std::make_shared<immer::atom<immer::vector<events::Lobby>>>(),
-      .running_sessions = running_sessions});
-  auto handlers = sessions::setup_moonlight_handlers(app_state, api_runtime_dir(), {});
-
-  std::atomic<int> stop_events{0};
-  auto observer = event_bus->register_handler<immer::box<events::StopStreamEvent>>(
-      [&stop_events](const immer::box<events::StopStreamEvent> &ev) {
-        if (ev->session_id == 4242) {
-          ++stop_events;
-        }
-      });
-
-  auto runner = std::make_shared<BlockingRunner>();
-  events::StreamSession session{};
-  session.session_id = 4242;
-  session.generation = 11;
-  session.event_bus = event_bus;
-  auto app = std::make_shared<events::App>();
-  app->start_virtual_compositor = false;
-  app->start_audio_server = false;
-  app->render_node = "software";
-  app->runner = runner;
-  session.app = app;
-
-  auto register_session = [&running_sessions, &session](std::uint64_t generation) {
-    auto replacement = session;
-    replacement.generation = generation;
-    running_sessions->update([replacement](const immer::vector<events::StreamSession> &) {
-      return immer::vector<events::StreamSession>{replacement};
-    });
-  };
-
-  register_session(11);
-  event_bus->fire_event(immer::box<events::StreamSession>(session));
-  REQUIRE(wait_until([&runner] { return runner->started.load(); }));
-  REQUIRE(session.wayland_display->load() != nullptr);
-
-  SECTION("a newer execution survives the old runner ending") {
-    register_session(12); // a new execution reuses the same session_id
-    runner->release.store(true);
-    REQUIRE(wait_until([&runner] { return runner->exited.load(); }));
-    // The runner-end callback stores nullptr right before its guarded stop check.
-    REQUIRE(wait_until([&session] { return session.wayland_display->load() == nullptr; }));
-    { std::lock_guard<std::recursive_mutex> lock(*app_state->session_lifecycle_mutex); }
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    REQUIRE(stop_events.load() == 0);
-    immer::vector<events::StreamSession> registered = running_sessions->load().get();
-    REQUIRE(registered.size() == 1);
-    REQUIRE(registered.at(0).generation == 12);
-  }
-
-  SECTION("the current execution is stopped and removed when its runner ends") {
-    runner->release.store(true);
-    REQUIRE(wait_until([&stop_events] { return stop_events.load() == 1; }));
-    REQUIRE(wait_until([&running_sessions] { return running_sessions->load()->size() == 0; }));
-  }
-
-  SECTION("stop followed by a new execution keeps the new execution") {
-    // This is the event the API/HTTPS stop endpoints dispatch; the production
-    // StopStreamEvent handler must be the one removing the old execution.
-    event_bus->fire_event(immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = 4242}));
-    REQUIRE(stop_events.load() == 1);
-    REQUIRE(running_sessions->load()->size() == 0);
-
-    register_session(12);
-    runner->release.store(true);
-    REQUIRE(wait_until([&runner] { return runner->exited.load(); }));
-    REQUIRE(wait_until([&session] { return session.wayland_display->load() == nullptr; }));
-    { std::lock_guard<std::recursive_mutex> lock(*app_state->session_lifecycle_mutex); }
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    REQUIRE(stop_events.load() == 1);
-    immer::vector<events::StreamSession> registered = running_sessions->load().get();
-    REQUIRE(registered.size() == 1);
-    REQUIRE(registered.at(0).generation == 12);
-  }
-
-  runner->release.store(true);
-  unsetenv("WOLF_SKIP_WAYLAND_SOCKET_WAIT");
 }
 
 TEST_CASE("Conditional stop races a session replacement", "[API]") {

@@ -26,13 +26,6 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
                        const std::string &runtime_dir,
                        const std::optional<AudioServer> &audio_server);
 
-/**
- * Runner-end callback: fires StopStreamEvent only while `session` is still the
- * registered execution, so a runner that ends late cannot stop a newer
- * execution that reused the same session_id. Returns true when fired.
- */
-bool stop_stream_if_current(const immer::box<state::AppState> &app_state, const events::StreamSession &session);
-
 struct RunnerArgs {
   const std::string &session_id;
 
