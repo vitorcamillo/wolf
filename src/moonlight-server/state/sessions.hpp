@@ -31,6 +31,19 @@ inline std::optional<events::StreamSession> get_session_by_id(const immer::vecto
   }
 }
 
+/** True while `generation` is still the execution registered for `session_id`. */
+inline bool is_current_execution(const immer::vector<events::StreamSession> &sessions,
+                                 std::size_t session_id,
+                                 std::uint64_t generation) {
+  auto current = get_session_by_id(sessions, session_id);
+  return current && current->generation == generation;
+}
+
+/** Resume replaces the session record but keeps the running execution: the new record takes its generation. */
+inline void carry_execution(const events::StreamSession &old_session, events::StreamSession &new_session) {
+  new_session.generation = old_session.generation;
+}
+
 inline std::optional<events::StreamSession> get_session_by_client(const immer::vector<events::StreamSession> &sessions,
                                                                   const wolf::config::PairedClient &client) {
   auto client_id = get_client_id(client);

@@ -178,8 +178,8 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
                       "[STREAM_SESSION] Wayland socket {} was not ready, aborting runner startup",
                       ready.wayland_socket_name);
             std::lock_guard<std::recursive_mutex> lifecycle_lock(*app_state->session_lifecycle_mutex);
-            auto current = state::get_session_by_id(app_state->running_sessions->load(), session->session_id);
-            if (current && current->generation == session->generation) {
+            if (state::is_current_execution(
+                    app_state->running_sessions->load(), session->session_id, session->generation)) {
               session->event_bus->fire_event(
                   immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = session->session_id}));
             }
@@ -232,9 +232,9 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
           if (run_session->stop_stream_when_over) {
             run_session->stream_session->wayland_display->store(nullptr);
             std::lock_guard<std::recursive_mutex> lifecycle_lock(*app_state->session_lifecycle_mutex);
-            auto current = state::get_session_by_id(app_state->running_sessions->load(),
-                                                    run_session->stream_session->session_id);
-            if (current && current->generation == run_session->stream_session->generation) {
+            if (state::is_current_execution(app_state->running_sessions->load(),
+                                            run_session->stream_session->session_id,
+                                            run_session->stream_session->generation)) {
               app_state->event_bus->fire_event(immer::box<events::StopStreamEvent>(
                   events::StopStreamEvent{.session_id = run_session->stream_session->session_id}));
             }
