@@ -94,6 +94,9 @@ struct Config {
    * Profiles will be shown in WolfUI
    */
   std::shared_ptr<immer::atom<ProfilesList>> profiles;
+
+  // Copies of Config share this lock so disk read-modify-write operations stay serialized.
+  std::shared_ptr<std::mutex> config_mutex = std::make_shared<std::mutex>();
 };
 
 /**

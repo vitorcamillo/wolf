@@ -1,12 +1,19 @@
 #include <events/events.hpp>
 #include <events/reflectors.hpp>
+#include <atomic>
+#include <cerrno>
+#include <cstdint>
+#include <filesystem>
 #include <fstream>
+#include <fcntl.h>
 #include <gst/gstelementfactory.h>
 #include <gst/gstregistry.h>
 #include <platforms/hw.hpp>
 #include <range/v3/view.hpp>
 #include <rfl/toml.hpp>
 #include <state/config.hpp>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace state {
 
@@ -20,6 +27,116 @@ constexpr char const *default_toml =
 
 using namespace std::literals;
 using namespace wolf::config;
+
+namespace {
+
+WolfConfig load_config_for_update(const std::string &source) {
+  try {
+    return rfl::toml::load<WolfConfig, rfl::DefaultIfMissing>(source).value();
+  } catch (...) {
+    throw std::runtime_error("Unable to load config for update");
+  }
+}
+
+void persist_config_atomically(const std::string &source, const WolfConfig &config) {
+  namespace fs = std::filesystem;
+  static std::atomic_uint64_t temp_counter{0};
+
+  const fs::path destination(source);
+  const auto directory = destination.has_parent_path() ? destination.parent_path() : fs::path(".");
+  const auto filename = destination.filename().string();
+  if (filename.empty() || filename == "." || filename == "..") {
+    throw std::runtime_error("Unable to persist config");
+  }
+
+  const int directory_fd = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (directory_fd < 0) {
+    throw std::runtime_error("Unable to persist config");
+  }
+
+  struct stat original_stat {};
+  bool destination_exists = false;
+  if (::fstatat(directory_fd, filename.c_str(), &original_stat, AT_SYMLINK_NOFOLLOW) == 0) {
+    destination_exists = true;
+    if (!S_ISREG(original_stat.st_mode)) {
+      ::close(directory_fd);
+      throw std::runtime_error("Unable to persist config");
+    }
+  } else if (errno != ENOENT) {
+    ::close(directory_fd);
+    throw std::runtime_error("Unable to persist config");
+  }
+
+  auto temp_name = fmt::format(".{}.tmp.{}.{}",
+                               filename,
+                               static_cast<unsigned long long>(::getpid()),
+                               static_cast<unsigned long long>(temp_counter.fetch_add(1)));
+  int temp_fd = ::openat(directory_fd,
+                         temp_name.c_str(),
+                         O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                         0600);
+  if (temp_fd < 0) {
+    ::close(directory_fd);
+    throw std::runtime_error("Unable to persist config");
+  }
+  if (::fchmod(temp_fd, 0600) != 0) {
+    ::close(temp_fd);
+    ::unlinkat(directory_fd, temp_name.c_str(), 0);
+    ::close(directory_fd);
+    throw std::runtime_error("Unable to persist config");
+  }
+  ::close(temp_fd);
+
+  auto cleanup = [&] {
+    ::unlinkat(directory_fd, temp_name.c_str(), 0);
+    ::close(directory_fd);
+  };
+
+  try {
+    // rfl writes only to the exclusive, same-directory temporary file.
+    auto save_result = rfl::toml::save((directory / temp_name).string(), config);
+    if (!save_result) {
+      throw std::runtime_error("Unable to persist config");
+    }
+
+    // Validate both TOML syntax and the Wolf configuration schema before publication.
+    (void)toml::parse_file((directory / temp_name).string());
+    auto parsed_config = rfl::toml::load<WolfConfig, rfl::DefaultIfMissing>((directory / temp_name).string());
+    if (!parsed_config) {
+      throw std::runtime_error("Unable to persist config");
+    }
+
+    temp_fd = ::openat(directory_fd, temp_name.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (temp_fd < 0) {
+      throw std::runtime_error("Unable to persist config");
+    }
+    struct stat temp_stat {};
+    if (::fstat(temp_fd, &temp_stat) != 0 ||
+        (destination_exists && (temp_stat.st_uid != original_stat.st_uid || temp_stat.st_gid != original_stat.st_gid) &&
+         ::fchown(temp_fd, original_stat.st_uid, original_stat.st_gid) != 0) ||
+        (destination_exists && ::fchmod(temp_fd, original_stat.st_mode & 07777) != 0)) {
+      ::close(temp_fd);
+      throw std::runtime_error("Unable to persist config");
+    }
+    if (::fsync(temp_fd) != 0) {
+      ::close(temp_fd);
+      throw std::runtime_error("Unable to persist config");
+    }
+    ::close(temp_fd);
+
+    if (::renameat(directory_fd, temp_name.c_str(), directory_fd, filename.c_str()) != 0 ||
+        ::fsync(directory_fd) != 0) {
+      throw std::runtime_error("Unable to persist config");
+    }
+  } catch (...) {
+    cleanup();
+    throw std::runtime_error("Unable to persist config");
+  }
+
+  cleanup();
+}
+
+} // namespace
 
 void create_default(const std::string &source) {
   std::ofstream out_file;
@@ -408,43 +525,43 @@ Config load_or_default(const std::string &source,
 }
 
 void pair(const Config &cfg, const PairedClient &client) {
-  // Update CFG
-  cfg.paired_clients->update([&client](const PairedClientList &paired_clients) {
-    // Removing the client if already present (see: https://github.com/games-on-whales/wolf/issues/211)
-    auto filtered_clients = paired_clients                                               //
-                            | ranges::views::filter([&client](auto paired_client) {      //
-                                return paired_client->client_cert != client.client_cert; //
-                              })                                                         //
-                            | ranges::to<PairedClientList>();                            //
-    return filtered_clients.push_back(client);
-  });
+  std::lock_guard lock(*cfg.config_mutex);
+  auto new_clients = cfg.paired_clients->load().get() |                         //
+                     ranges::views::filter([&client](auto paired_client) {     //
+                       return paired_client->client_cert != client.client_cert; //
+                     }) |                                                      //
+                     ranges::to<PairedClientList>();                           //
+  new_clients = new_clients.push_back(client);
 
-  // Update TOML
-  auto tml = rfl::toml::load<WolfConfig, rfl::DefaultIfMissing>(cfg.config_source).value();
-  tml.paired_clients.push_back(client);
-  rfl::toml::save(cfg.config_source, tml);
-}
-
-void unpair(const Config &cfg, const PairedClient &client) {
-  // Update CFG
-  cfg.paired_clients->update([&client](const PairedClientList &paired_clients) {
-    return paired_clients                                               //
-           | ranges::views::filter([&client](auto paired_client) {      //
-               return paired_client->client_cert != client.client_cert; //
-             })                                                         //
-           | ranges::to<PairedClientList>();                            //
-  });
-
-  // Update TOML
-  auto tml = rfl::toml::load<WolfConfig, rfl::DefaultIfMissing>(cfg.config_source).value();
+  auto tml = load_config_for_update(cfg.config_source);
   tml.paired_clients.erase(std::remove_if(tml.paired_clients.begin(),
                                           tml.paired_clients.end(),
                                           [&client](const auto &v) { return v.client_cert == client.client_cert; }),
                            tml.paired_clients.end());
-  rfl::toml::save(cfg.config_source, tml);
+  tml.paired_clients.push_back(client);
+  persist_config_atomically(cfg.config_source, tml);
+  cfg.paired_clients->store(new_clients);
+}
+
+void unpair(const Config &cfg, const PairedClient &client) {
+  std::lock_guard lock(*cfg.config_mutex);
+  auto new_clients = cfg.paired_clients->load().get() |                         //
+                     ranges::views::filter([&client](auto paired_client) {     //
+                       return paired_client->client_cert != client.client_cert; //
+                     }) |                                                      //
+                     ranges::to<PairedClientList>();                           //
+
+  auto tml = load_config_for_update(cfg.config_source);
+  tml.paired_clients.erase(std::remove_if(tml.paired_clients.begin(),
+                                          tml.paired_clients.end(),
+                                          [&client](const auto &v) { return v.client_cert == client.client_cert; }),
+                           tml.paired_clients.end());
+  persist_config_atomically(cfg.config_source, tml);
+  cfg.paired_clients->store(new_clients);
 }
 
 void update_client_settings(const Config &cfg, std::size_t client_id, const PairedClient &updated_client) {
+  std::lock_guard lock(*cfg.config_mutex);
 
   auto update_client_fn = [&](immer::box<PairedClient> client) -> immer::box<PairedClient> {
     if (get_client_id(client) == client_id) {
@@ -453,27 +570,22 @@ void update_client_settings(const Config &cfg, std::size_t client_id, const Pair
     return client;
   };
 
-  cfg.paired_clients->update([&](const PairedClientList &paired_clients) {
-    return paired_clients |                             //
-           ranges::views::transform(update_client_fn) | //
-           ranges::to<PairedClientList>();
-  });
+  auto new_clients = cfg.paired_clients->load().get() |    //
+                     ranges::views::transform(update_client_fn) | //
+                     ranges::to<PairedClientList>();
 
-  // Update the TOML file
-  auto tml = rfl::toml::load<WolfConfig, rfl::DefaultIfMissing>(cfg.config_source).value();
-
+  auto tml = load_config_for_update(cfg.config_source);
   tml.paired_clients = tml.paired_clients |                         //
                        ranges::views::transform(update_client_fn) | //
                        ranges::to<std::vector<PairedClient>>();
-
-  // Save back to file
-  rfl::toml::save(cfg.config_source, tml);
+  persist_config_atomically(cfg.config_source, tml);
+  cfg.paired_clients->store(new_clients);
 }
 
 void update_profiles(const Config &cfg, const ProfilesList &profiles) {
-  cfg.profiles->store(profiles);
+  std::lock_guard lock(*cfg.config_mutex);
 
-  auto tml = rfl::toml::load<WolfConfig, rfl::DefaultIfMissing>(cfg.config_source).value();
+  auto tml = load_config_for_update(cfg.config_source);
   tml.profiles = profiles | //
                  ranges::views::transform([](const immer::box<events::Profile> &p) {
                    return Profile{
@@ -494,7 +606,8 @@ void update_profiles(const Config &cfg, const ProfilesList &profiles) {
                    };
                  }) | //
                  ranges::to_vector;
-  rfl::toml::save(cfg.config_source, tml);
+  persist_config_atomically(cfg.config_source, tml);
+  cfg.profiles->store(profiles);
 }
 
 } // namespace state

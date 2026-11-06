@@ -385,9 +385,10 @@ void UnixSocketServer::send_http(std::shared_ptr<UnixSocket> socket,
 }
 
 void UnixSocketServer::send_data(std::shared_ptr<UnixSocket> socket, std::string_view data) {
+  auto owned_data = std::make_shared<std::string>(data);
   boost::asio::async_write(socket->socket,
-                           boost::asio::buffer(data),
-                           [this, socket](const boost::system::error_code &ec, std::size_t /*length*/) {
+                           boost::asio::buffer(*owned_data),
+                           [this, socket, owned_data](const boost::system::error_code &ec, std::size_t /*length*/) {
                              if (ec) {
                                logs::log(logs::error, "[API] Error sending data: {}", ec.message());
                                close(*socket);

@@ -10,6 +10,7 @@
 #include <sessions/handlers.hpp>
 #include <state/config.hpp>
 #include <state/sessions.hpp>
+#include <thread>
 
 using Catch::Matchers::ContainsSubstring;
 using Catch::Matchers::Equals;
@@ -36,6 +37,7 @@ req(CURL *handle,
     const std::vector<std::string> &header_params = {}) {
   logs::log(logs::trace, "[CURL] Sending [{}] -> {}", (int)method, target);
   curl_easy_setopt(handle, CURLOPT_URL, target.data());
+  curl_easy_setopt(handle, CURLOPT_TIMEOUT_MS, 5000L);
 
   /* Set method */
   switch (method) {
@@ -61,7 +63,7 @@ req(CURL *handle,
 
   /* Pass POST params (if present) */
   if (method == HTTPMethod::POST && !post_body.empty()) {
-    logs::log(logs::trace, "[CURL] POST: {}", post_body);
+    logs::log(logs::trace, "[CURL] POST body size: {}", post_body.size());
 
     curl_easy_setopt(handle, CURLOPT_POST, 1L);
     headers = curl_slist_append(headers, "Content-type: application/json");
@@ -94,7 +96,7 @@ req(CURL *handle,
     curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &response_code);
     // Avoid printing binary output if the target is "/api/v1/utils/get-icon"
     if (target.find("/api/v1/utils/get-icon") == std::string::npos) {
-      logs::log(logs::trace, "[CURL] Received {} - {}", response_code, read_buf);
+      logs::log(logs::trace, "[CURL] Received {} ({} bytes)", response_code, read_buf.size());
     }
     return {{response_code, read_buf}};
   }
@@ -213,6 +215,100 @@ TEST_CASE("Pair APIs", "[API]") {
   }
 }
 
+TEST_CASE("Config writes stay valid and preserve state on failure", "[config][concurrency]") {
+  auto event_bus = std::make_shared<events::EventBusType>();
+  auto running_sessions = std::make_shared<immer::atom<immer::vector<events::StreamSession>>>();
+  const auto test_dir = std::filesystem::temp_directory_path() / ("wolf-config-write-" + state::gen_uuid());
+  std::filesystem::create_directories(test_dir);
+  const auto source = test_dir / "config.toml";
+  std::filesystem::copy_file("config.test.toml", source);
+  auto config = state::load_or_default(source.string(), event_bus, running_sessions);
+  std::filesystem::permissions(source,
+                               std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
+                                   std::filesystem::perms::group_read,
+                               std::filesystem::perm_options::replace);
+
+  const auto initial_clients = config.paired_clients->load().get();
+  REQUIRE_FALSE(initial_clients.empty());
+  const auto initial_client = initial_clients[0];
+  const auto client_id = state::get_client_id(*initial_client);
+  const auto updated_client = state::PairedClient{.client_cert = initial_client->client_cert,
+                                                  .app_state_folder = "concurrent-client-update",
+                                                  .settings = initial_client->settings};
+
+  const auto initial_profiles = config.profiles->load().get();
+  REQUIRE_FALSE(initial_profiles.empty());
+  const auto first_profile = initial_profiles[0];
+  auto profile = events::Profile{.id = first_profile->id,
+                                 .name = "concurrent-profile-update",
+                                 .icon_png_path = first_profile->icon_png_path,
+                                 .pin = first_profile->pin,
+                                 .apps = first_profile->apps};
+  const auto updated_profiles = initial_profiles.set(0, immer::box<events::Profile>{std::move(profile)});
+
+  // The copied Config must share the same mutex while independent domains update in parallel.
+  auto copied_config = config;
+  std::atomic_bool writers_done{false};
+  std::atomic_bool invalid_snapshot{false};
+  std::atomic_size_t snapshots_read{0};
+  std::thread reader([&] {
+    do {
+      auto snapshot = rfl::toml::load<wolf::config::WolfConfig, rfl::DefaultIfMissing>(source.string());
+      if (!snapshot) {
+        invalid_snapshot.store(true);
+        break;
+      }
+      ++snapshots_read;
+    } while (!writers_done.load());
+  });
+  std::thread client_writer([&] {
+    try {
+      for (int i = 0; i < 30; ++i) {
+        state::update_client_settings(config, client_id, updated_client);
+      }
+    } catch (...) {
+      invalid_snapshot.store(true);
+    }
+  });
+  std::thread profile_writer([&] {
+    try {
+      for (int i = 0; i < 30; ++i) {
+        state::update_profiles(copied_config, updated_profiles);
+      }
+    } catch (...) {
+      invalid_snapshot.store(true);
+    }
+  });
+  client_writer.join();
+  profile_writer.join();
+  writers_done.store(true);
+  reader.join();
+
+  REQUIRE_FALSE(invalid_snapshot.load());
+  REQUIRE(snapshots_read > 0);
+  auto saved = rfl::toml::load<wolf::config::WolfConfig, rfl::DefaultIfMissing>(source.string()).value();
+  REQUIRE(saved.paired_clients[0].app_state_folder == "concurrent-client-update");
+  REQUIRE(saved.profiles[0].name == "concurrent-profile-update");
+  REQUIRE((std::filesystem::status(source).permissions() & std::filesystem::perms::group_read) !=
+          std::filesystem::perms::none);
+  REQUIRE((std::filesystem::status(source).permissions() & std::filesystem::perms::group_write) ==
+          std::filesystem::perms::none);
+
+  // A symlink destination is rejected before publication; its target and in-memory state remain intact.
+  const auto symlink_destination = test_dir / "symlink.toml";
+  std::filesystem::create_symlink(source, symlink_destination);
+  auto symlink_config = config;
+  symlink_config.config_source = symlink_destination.string();
+  REQUIRE_THROWS(state::update_client_settings(symlink_config, client_id, updated_client));
+  auto after_failure = rfl::toml::load<wolf::config::WolfConfig, rfl::DefaultIfMissing>(source.string()).value();
+  REQUIRE(after_failure.paired_clients[0].app_state_folder == "concurrent-client-update");
+  REQUIRE(config.paired_clients->load().get()[0]->app_state_folder == "concurrent-client-update");
+  for (const auto &entry : std::filesystem::directory_iterator(test_dir)) {
+    REQUIRE(entry.path().filename().string().find(".symlink.toml.tmp.") == std::string::npos);
+  }
+  std::filesystem::remove_all(test_dir);
+}
+
 TEST_CASE("APPs APIs", "[API]") {
   auto event_bus = std::make_shared<events::EventBusType>();
   auto running_sessions = std::make_shared<immer::atom<immer::vector<events::StreamSession>>>();
@@ -237,6 +333,7 @@ TEST_CASE("APPs APIs", "[API]") {
 
   curl_easy_setopt(curl.get(), CURLOPT_UNIX_SOCKET_PATH, socket_path.c_str());
   curl_easy_setopt(curl.get(), CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_0);
+  curl_easy_setopt(curl.get(), CURLOPT_BUFFERSIZE, 1024L);
 
   // Test that the initial list of apps matches what's in the test config file
   auto response = req(curl.get(), HTTPMethod::GET, "http://localhost/api/v1/apps");
@@ -246,6 +343,13 @@ TEST_CASE("APPs APIs", "[API]") {
   REQUIRE(apps.apps.size() == 2);
   REQUIRE(apps.apps[0].title == "Firefox");
   REQUIRE(apps.apps[1].title == "Test ball");
+  const auto initial_apps_response = response->second;
+  for (int i = 0; i < 5; ++i) {
+    response = req(curl.get(), HTTPMethod::GET, "http://localhost/api/v1/apps");
+    REQUIRE(response);
+    REQUIRE(response->first == 200);
+    REQUIRE(response->second == initial_apps_response);
+  }
 
   // Test that we can add an app
   auto app = rfl::Reflector<wolf::core::events::App>::ReflType{
@@ -266,6 +370,7 @@ TEST_CASE("APPs APIs", "[API]") {
                                         .ports = {"8080:8080"}}};
   response = req(curl.get(), HTTPMethod::POST, "http://localhost/api/v1/apps/add", rfl::json::write(app));
   REQUIRE(response);
+  REQUIRE(response->first == 200);
   REQUIRE_THAT(response->second, Equals("{\"success\":true}"));
 
   // Test that the new app is in the list
@@ -284,6 +389,7 @@ TEST_CASE("APPs APIs", "[API]") {
   auto app_delete = AppDeleteRequest{.id = "test"};
   response = req(curl.get(), HTTPMethod::POST, "http://localhost/api/v1/apps/delete", rfl::json::write(app_delete));
   REQUIRE(response);
+  REQUIRE(response->first == 200);
   REQUIRE_THAT(response->second, Equals("{\"success\":true}"));
 
   response = req(curl.get(), HTTPMethod::GET, "http://localhost/api/v1/apps");
@@ -291,6 +397,47 @@ TEST_CASE("APPs APIs", "[API]") {
   auto apps3 = rfl::json::read<AppListResponse>(response->second).value();
   REQUIRE(apps3.success);
   REQUIRE(apps3.apps.size() == 2);
+
+  // A synthetic pipeline forces an API response larger than typical socket buffers.
+  constexpr auto large_pipeline_size = 160 * 1024;
+  auto large_app = rfl::Reflector<wolf::core::events::App>::ReflType{
+      .title = "Large response test",
+      .id = "large-response-test",
+      .support_hdr = app.support_hdr,
+      .h264_gst_pipeline = std::string(large_pipeline_size, 'x'),
+      .hevc_gst_pipeline = app.hevc_gst_pipeline,
+      .av1_gst_pipeline = app.av1_gst_pipeline,
+      .render_node = app.render_node,
+      .opus_gst_pipeline = app.opus_gst_pipeline,
+      .start_virtual_compositor = app.start_virtual_compositor,
+      .runner = app.runner};
+  response = req(curl.get(), HTTPMethod::POST, "http://localhost/api/v1/apps/add", rfl::json::write(large_app));
+  REQUIRE(response);
+  REQUIRE(response->first == 200);
+  REQUIRE(response->second == "{\"success\":true}");
+
+  response = req(curl.get(), HTTPMethod::GET, "http://localhost/api/v1/apps");
+  REQUIRE(response);
+  REQUIRE(response->first == 200);
+  REQUIRE(response->second.size() > 128 * 1024);
+  auto large_apps = rfl::json::read<AppListResponse>(response->second).value();
+  REQUIRE(large_apps.success);
+  REQUIRE(large_apps.apps.size() == 3);
+  REQUIRE(large_apps.apps.back().id == "large-response-test");
+  REQUIRE(large_apps.apps.back().h264_gst_pipeline == std::string(large_pipeline_size, 'x'));
+  REQUIRE(response->second == rfl::json::write(large_apps));
+
+  auto large_app_delete = AppDeleteRequest{.id = "large-response-test"};
+  response =
+      req(curl.get(), HTTPMethod::POST, "http://localhost/api/v1/apps/delete", rfl::json::write(large_app_delete));
+  REQUIRE(response);
+  REQUIRE(response->first == 200);
+  REQUIRE(response->second == "{\"success\":true}");
+  response = req(curl.get(), HTTPMethod::GET, "http://localhost/api/v1/apps");
+  REQUIRE(response);
+  auto final_apps = rfl::json::read<AppListResponse>(response->second).value();
+  REQUIRE(final_apps.success);
+  REQUIRE(final_apps.apps.size() == 2);
 }
 
 TEST_CASE("Profile APIs", "[API]") {
