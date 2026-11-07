@@ -135,6 +135,11 @@ services:
     restart: unless-stopped
 ....
 
+[NOTE]
+====
+If the container loses GPU access after `systemctl daemon-reload` (`Failed to initialize NVML: Unknown Error`), see xref:user:troubleshooting.adoc#nvidia-toolkit-daemon-reload[Troubleshooting]. Listing `/dev/nvidia*` under `devices:` avoids this issue.
+====
+
 One last final check: we have to make sure that the `nvidia-drm` module has been loaded and that the module is loaded with the flag `modeset=1`.
 
 [source,bash]

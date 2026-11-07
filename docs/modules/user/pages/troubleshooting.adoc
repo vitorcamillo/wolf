@@ -186,6 +186,73 @@ docker volume ls | grep nvidia-driver
 
 (thanks to G.Reaper)
 
+[#nvidia-toolkit-daemon-reload]
+== Nvidia (Container Toolkit): GPU lost after `systemctl daemon-reload`
+
+A working stream may fail to open, with Moonlight disconnecting or showing a black screen while Wolf keeps running. Its logs may show:
+
+[source,text]
+....
+[EGL] 0x3003 (BAD_ALLOC) eglQueryDevicesEXT: EGL_BAD_ALLOC error: In eglQueryDevicesEXT: Failed to allocate device list.
+CUDA call failed: CUDA_ERROR_NOT_PERMITTED, operation not permitted
+failed to create CUDA context
+....
+
+Check the GPU inside the container:
+
+[source,bash]
+....
+docker exec wolf nvidia-smi -L
+....
+
+If this prints `Failed to initialize NVML: Unknown Error` while host `nvidia-smi` works, the container has lost GPU access.
+
+With `--gpus=all` or Compose `deploy.resources...driver: nvidia`, the toolkit hook grants cgroup access to `/dev/nvidia*` outside runc. If Docker uses the systemd cgroup driver, `systemctl daemon-reload` reapplies the container cgroup and can remove that access (package installs and upgrades may trigger a reload). Check with:
+
+[source,bash]
+....
+docker info -f '{{.CgroupDriver}}'
+....
+
+See the https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/troubleshooting.html#containers-losing-access-to-gpus-with-error-failed-to-initialize-nvml-unknown-error[Nvidia Container Toolkit troubleshooting guide].
+
+Restart the container to restore access immediately:
+
+[source,bash]
+....
+docker restart wolf
+....
+
+One of the permanent fixes Nvidia documents is to list GPU nodes explicitly alongside existing devices. Check the names on your host; multiple GPUs may have `/dev/nvidia1` and other numbered nodes:
+
+[source,bash]
+....
+ls /dev/nvidia*
+....
+
+[source,yaml]
+....
+devices:
+  - /dev/dri
+  - /dev/uinput
+  - /dev/uhid
+  - /dev/nvidia0
+  - /dev/nvidiactl
+  - /dev/nvidia-uvm
+  - /dev/nvidia-uvm-tools
+  - /dev/nvidia-modeset
+....
+
+For Docker CLI, add the matching device options, for example:
+
+[source,bash]
+....
+--device /dev/nvidia0 --device /dev/nvidiactl --device /dev/nvidia-uvm \
+--device /dev/nvidia-uvm-tools --device /dev/nvidia-modeset
+....
+
+Nvidia also documents the `cgroupfs` cgroup driver in `/etc/docker/daemon.json` or CDI. The quickstart's `Nvidia (Manual)` method already passes devices explicitly.
+
 == Problems with AV1 Streaming
 
 Cards such as the 7900XTX that have problems with encoding, as well as CPUs such as the N150 have reported problems with AV1 streaming.
