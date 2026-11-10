@@ -173,7 +173,9 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
           session->keyboard->emplace(virtual_display::WaylandKeyboard(wl_state));
           session->touch_screen->emplace(virtual_display::WaylandTouchScreen(wl_state));
 
-          if (!wait_for_wayland_socket(runtime_dir, ready.wayland_socket_name)) {
+          // Without a virtual compositor (e.g. apps that capture the host X server) there is no socket to wait for
+          if (session->app->start_virtual_compositor &&
+              !wait_for_wayland_socket(runtime_dir, ready.wayland_socket_name)) {
             logs::log(logs::error,
                       "[STREAM_SESSION] Wayland socket {} was not ready, aborting runner startup",
                       ready.wayland_socket_name);
