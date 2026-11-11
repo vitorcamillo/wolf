@@ -164,14 +164,18 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
         auto w_display_ready = on_ready->get_future().then([session, runtime_dir, app_state](auto fut) {
           streaming::WaylandDisplayReady ready = fut.get();
 
-          auto wl_state = virtual_display::create_wayland_display(ready.wayland_plugin, ready.wayland_socket_name);
-          // Set the wayland display
-          session->wayland_display->store(wl_state);
+          // Without a virtual compositor the uinput mouse/keyboard created above must be kept:
+          // replacing them with Wayland devices would destroy them right after the runner gets their nodes
+          if (session->app->start_virtual_compositor) {
+            auto wl_state = virtual_display::create_wayland_display(ready.wayland_plugin, ready.wayland_socket_name);
+            // Set the wayland display
+            session->wayland_display->store(wl_state);
 
-          // Set virtual devices
-          session->mouse->emplace(virtual_display::WaylandMouse(wl_state));
-          session->keyboard->emplace(virtual_display::WaylandKeyboard(wl_state));
-          session->touch_screen->emplace(virtual_display::WaylandTouchScreen(wl_state));
+            // Set virtual devices
+            session->mouse->emplace(virtual_display::WaylandMouse(wl_state));
+            session->keyboard->emplace(virtual_display::WaylandKeyboard(wl_state));
+            session->touch_screen->emplace(virtual_display::WaylandTouchScreen(wl_state));
+          }
 
           // Without a virtual compositor (e.g. apps that capture the host X server) there is no socket to wait for
           if (session->app->start_virtual_compositor &&
