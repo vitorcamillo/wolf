@@ -450,8 +450,15 @@ void resume(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
   auto client_ip = get_client_ip<SimpleWeb::HTTPS>(request);
   auto old_session = state::get_session_by_client(state->running_sessions->load(), current_client);
   if (old_session) {
-    auto new_session =
-        create_run_session(request->parse_query_string(), client_ip, current_client, state, *old_session->app);
+    // The app may have been re-registered while the session was running (e.g. the Desktop app
+    // following a new monitor layout): resume with the current definition when it is the same kind
+    // of app, so the restarted runner and pipelines don't keep stale settings.
+    immer::box<events::App> run_app{*old_session->app};
+    if (auto current = state::get_moonlight_app_by_id(state->config, old_session->app->base.id);
+        current && (*current)->start_virtual_compositor == old_session->app->start_virtual_compositor) {
+      run_app = *current;
+    }
+    auto new_session = create_run_session(request->parse_query_string(), client_ip, current_client, state, *run_app);
     state::carry_execution(*old_session, *new_session);
     // Carry over the old session display handle
     new_session->wayland_display = std::move(old_session->wayland_display);
